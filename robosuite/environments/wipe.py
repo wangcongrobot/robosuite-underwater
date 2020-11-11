@@ -21,27 +21,29 @@ DEFAULT_WIPE_CONFIG = {
     "distance_th_multiplier": 5.0,                  # multiplier in the tanh function for the aforementioned reward
 
     # settings for table top
-    "table_full_size": [0.6, 0.8, 0.05],            # Size of tabletop
-    "table_offset": [0, 0, 0.8],                    # Offset of table (z dimension defines max height of table)
-    "table_friction": [0.00001, 0.005, 0.0001],     # Friction parameters for the table
+    "table_full_size": [0.5, 0.8, 0.05],            # Size of tabletop
+    "table_offset": [0.15, 0, 0.9],                    # Offset of table (z dimension defines max height of table)
+    "table_friction": [0.03, 0.005, 0.0001],     # Friction parameters for the table
     "table_friction_std": 0,                        # Standard deviation to sample different friction parameters for the table each episode
     "table_height": 0.0,                            # Additional height of the table over the default location
     "table_height_std": 0.0,                        # Standard deviation to sample different heigths of the table each episode
     "line_width": 0.04,                             # Width of the line to wipe (diameter of the pegs)
     "two_clusters": False,                          # if the dirt to wipe is one continuous line or two
     "coverage_factor": 0.6,                         # how much of the table surface we cover
-    "num_sensors": 50,                              # How many particles of dirt to generate in the environment
+    "num_sensors": 100,                              # How many particles of dirt to generate in the environment
 
     # settings for thresholds
-    "contact_threshold": 3,                         # Minimum eef force to qualify as contact [N]
-    "touch_threshold": 5,                           # force threshold (N) to overcome to change the color of the sensor (wipe the peg)
-    "pressure_threshold_max": 70,                   # maximum force allowed (N)
+    "contact_threshold": 1.0,                         # Minimum eef force to qualify as contact [N]
+    "pressure_threshold": 0.5,                      # force threshold (N) to overcome to get increased contact wiping reward
+    "pressure_threshold_max": 60.,                  # maximum force allowed (N)
 
     # misc settings
     "print_results": False,                         # Whether to print results or not
     "get_info": False,                              # Whether to grab info after each env step if not
     "use_robot_obs": True,                          # if we use robot observations (proprioception) as input to the policy
+    "use_contact_obs": True,                        # if we use a binary observation for whether robot is in contact or not
     "early_terminations": False,                    # Whether we allow for early terminations or not
+    "use_condensed_obj_obs": True,                  # Whether to use condensed object observation representation (only applicable if obj obs is active)
 }
 
 
@@ -207,7 +209,7 @@ class Wipe(RobotEnv):
         # Final reward computation
         # So that is better to finish that to stay touching the table for 100 steps
         # The 0.5 comes from continuous_distance_reward at 0. If something changes, this may change as well
-        self.task_complete_reward = 50 * (self.wipe_contact_reward + 0.5)
+        self.task_complete_reward = self.unit_wiped_reward * (self.wipe_contact_reward + 0.5)
         # Verify that the distance multiplier is not greater than the task complete reward
         assert self.task_complete_reward > self.distance_multiplier,\
             "Distance multiplier cannot be greater than task complete reward!"
@@ -226,15 +228,16 @@ class Wipe(RobotEnv):
 
         # settings for thresholds
         self.contact_threshold = self.task_config['contact_threshold']
-        self.touch_threshold = self.task_config['touch_threshold']
-        self.pressure_threshold = self.task_config['touch_threshold']
+        self.pressure_threshold = self.task_config['pressure_threshold']
         self.pressure_threshold_max = self.task_config['pressure_threshold_max']
 
         # misc settings
         self.print_results = self.task_config['print_results']
         self.get_info = self.task_config['get_info']
         self.use_robot_obs = self.task_config['use_robot_obs']
+        self.use_contact_obs = self.task_config['use_contact_obs']
         self.early_terminations = self.task_config['early_terminations']
+        self.use_condensed_obj_obs = self.task_config['use_condensed_obj_obs']
 
         # Scale reward if desired (see reward method for details)
         self.reward_normalization_factor = horizon / \
@@ -330,14 +333,17 @@ class Wipe(RobotEnv):
 
         # Neg Reward from collisions of the arm with the table
         if self._check_arm_contact()[0]:
+            #print("COLLISION")
             if self.reward_shaping:
                 reward = self.arm_limit_collision_penalty
             self.collisions += 1
         elif self._check_q_limits()[0]:
+            #print("LIMIT")
             if self.reward_shaping:
                 reward = self.arm_limit_collision_penalty
             self.collisions += 1
         else:
+            #print("GOOD")
             # If the arm is not colliding or in joint limits, we check if we are wiping
             # (we don't want to reward wiping if there are unsafe situations)
             sensors_active_ids = []
@@ -460,6 +466,11 @@ class Wipe(RobotEnv):
                 if total_force_ee > self.pressure_threshold_max:
                     reward -= self.excess_force_penalty_mul * total_force_ee
                     self.f_excess += 1
+                # TODO: Need to include this computation somehow in the scaled reward computation
+                elif total_force_ee > self.pressure_threshold and self.sim.data.ncon > 1:
+                    reward += self.wipe_contact_reward + 0.01 * total_force_ee
+                    if self.sim.data.ncon > 50:
+                        reward += 10. * self.wipe_contact_reward
 
                 # Penalize large accelerations
                 reward -= self.ee_accel_penalty * np.mean(abs(self.robots[0].recent_ee_acc.current))
@@ -547,8 +558,8 @@ class Wipe(RobotEnv):
         self.f_excess = 0
 
         # ee resets - bias at initial state
-        self.ee_force_bias = self.robots[0].ee_force
-        self.ee_torque_bias = self.robots[0].ee_torque
+        self.ee_force_bias = np.zeros(3)#self.robots[0].ee_force
+        self.ee_torque_bias = np.zeros(3)#self.robots[0].ee_torque
 
     def _get_observation(self):
         """
@@ -573,30 +584,46 @@ class Wipe(RobotEnv):
         # Get prefix from robot model to avoid naming clashes for multiple robots
         pf = self.robots[0].robot_model.naming_prefix
 
-        # Add binary contact observation
-        di[pf + "contact-obs"] = self._has_gripper_contact
-        di[pf + "robot-state"] = np.concatenate((di[pf + "robot-state"], [di[pf + "contact-obs"]]))
+        # Add binary contact observation if requested
+        if self.use_contact_obs:
+            di[pf + "contact-obs"] = self._has_gripper_contact
+            di[pf + "robot-state"] = np.concatenate((di[pf + "robot-state"], [di[pf + "contact-obs"]]))
 
         # object information in the observation
         if self.use_object_obs:
             gripper_site_pos = np.array(self.sim.data.site_xpos[self.robots[0].eef_site_id])
-            # position of objects to wipe
-            acc = np.array([])
-            for sensor_name in self.model.arena.sensor_names:
-                parts = sensor_name.split('_')
-                sensor_id = int(parts[1])
-                sensor_pos = np.array(
-                    self.sim.data.site_xpos[
-                        self.sim.model.site_name2id(self.model.arena.sensor_site_names[sensor_name])])
-                di['sensor' + str(sensor_id) + '_pos'] = sensor_pos
-                acc = np.concatenate([acc, di['sensor' + str(sensor_id) + '_pos']])
-                di['sensor' + str(sensor_id) + '_wiped'] = [0, 1][sensor_id in self.wiped_sensors]
-                acc = np.concatenate([acc, [di['sensor' + str(sensor_id) + '_wiped']]])
-                # proprioception
+            if self.use_condensed_obj_obs:
+                # use implicit representation of wiping objects
+                wipe_radius, mean_sensor_pos, gripper_to_wipe_centroid = self._get_wipe_information
+                di["proportion_wiped"] = len(self.wiped_sensors) / self.num_sensors
+                di["wipe_radius"] = wipe_radius
+                di["wipe_centroid"] = mean_sensor_pos
+                di["object-state"] = np.concatenate([
+                    [di["proportion_wiped"]], [di["wipe_radius"]], di["wipe_centroid"],
+                ])
+                # ego-centric proprioception
                 if self.use_robot_obs:
-                    di['gripper_to_sensor' + str(sensor_id)] = gripper_site_pos - sensor_pos
-                    acc = np.concatenate([acc, di['gripper_to_sensor' + str(sensor_id)]])
-            di['object-state'] = acc
+                    di["gripper_to_wipe_centroid"] = gripper_to_wipe_centroid
+                    di["object-state"] = np.concatenate([di["object-state"], di["gripper_to_wipe_centroid"]])
+            else:
+                # use explicit representation of wiping objects
+                # position of objects to wipe
+                acc = np.array([])
+                for sensor_name in self.model.arena.sensor_names:
+                    parts = sensor_name.split('_')
+                    sensor_id = int(parts[1])
+                    sensor_pos = np.array(
+                        self.sim.data.site_xpos[
+                            self.sim.model.site_name2id(self.model.arena.sensor_site_names[sensor_name])])
+                    di['sensor' + str(sensor_id) + '_pos'] = sensor_pos
+                    acc = np.concatenate([acc, di['sensor' + str(sensor_id) + '_pos']])
+                    di['sensor' + str(sensor_id) + '_wiped'] = [0, 1][sensor_id in self.wiped_sensors]
+                    acc = np.concatenate([acc, [di['sensor' + str(sensor_id) + '_wiped']]])
+                    # ego-centric proprioception
+                    if self.use_robot_obs:
+                        di['gripper_to_sensor' + str(sensor_id)] = gripper_site_pos - sensor_pos
+                        acc = np.concatenate([acc, di['gripper_to_sensor' + str(sensor_id)]])
+                di['object-state'] = acc
 
         return di
 
@@ -659,6 +686,11 @@ class Wipe(RobotEnv):
         """
         reward, done, info = super()._post_action(action)
 
+        # Update force bias
+        if np.linalg.norm(self.ee_force_bias) == 0:
+            self.ee_force_bias = self.robots[0].ee_force
+            self.ee_torque_bias = self.robots[0].ee_torque
+
         if self.get_info:
             info['add_vals'] = ['nwipedsensors', 'colls', 'percent_viapoints_', 'f_excess']
             info['nwipedsensors'] = len(self.wiped_sensors)
@@ -683,6 +715,62 @@ class Wipe(RobotEnv):
             assert len(robots) == 1, "Error: Only one robot should be inputted for this task!"
 
     @property
+    def _eef_xpos(self):
+        """End Effector position"""
+        return np.array(self.sim.data.site_xpos[self.robots[0].eef_site_id])
+
+    @property
+    def _gripper_to_wipe_centroid(self):
+        """Returns vector from the third gripper to the centroid of the wiping markers."""
+        mean_pos_to_things_to_wipe = np.zeros(3)
+        gripper_pos = self._eef_xpos
+        if len(self.wiped_sensors) < len(self.model.arena.sensor_names):
+            num_non_wiped_sensors = 0
+            for sensor_name in self.model.arena.sensor_names:
+                parts = sensor_name.split('_')
+                sensor_id = int(parts[1])
+                if sensor_id not in self.wiped_sensors:
+                    sensor_pos = np.array(
+                        self.sim.data.site_xpos[
+                            self.sim.model.site_name2id(self.model.arena.sensor_site_names[sensor_name])])
+                    mean_pos_to_things_to_wipe += sensor_pos - gripper_pos
+                    num_non_wiped_sensors += 1
+            mean_pos_to_things_to_wipe /= max(1, num_non_wiped_sensors)
+        return mean_pos_to_things_to_wipe
+
+    @property
+    def _get_wipe_information(self):
+        """Returns set of wiping information"""
+        mean_pos_to_things_to_wipe = np.zeros(3)
+        mean_sensor_pos = np.zeros(3)
+        gripper_pos = self._eef_xpos
+        sensor_pos_arr = []
+        if len(self.wiped_sensors) < len(self.model.arena.sensor_names):
+            num_non_wiped_sensors = 0
+            for sensor_name in self.model.arena.sensor_names:
+                parts = sensor_name.split('_')
+                sensor_id = int(parts[1])
+                if sensor_id not in self.wiped_sensors:
+                    sensor_pos = np.array(
+                        self.sim.data.site_xpos[
+                            self.sim.model.site_name2id(self.model.arena.sensor_site_names[sensor_name])])
+                    sensor_pos_arr.append(sensor_pos)
+                    mean_sensor_pos += sensor_pos
+                    mean_pos_to_things_to_wipe += sensor_pos - gripper_pos
+                    num_non_wiped_sensors += 1
+            mean_sensor_pos /= max(1, num_non_wiped_sensors)
+            mean_pos_to_things_to_wipe /= max(1, num_non_wiped_sensors)
+        # Radius of circle from centroid capturing all remaining wiping markers
+        max_radius = 0
+        if not np.array_equal(mean_pos_to_things_to_wipe, np.zeros(3)):
+            for sensor_pos in sensor_pos_arr:
+                dist = np.linalg.norm(sensor_pos - mean_sensor_pos)
+                if dist > max_radius:
+                    max_radius = dist
+        # Return all values
+        return max_radius, mean_sensor_pos, mean_pos_to_things_to_wipe
+
+    @property
     def _has_gripper_contact(self):
         """
         Determines whether the gripper is making contact with an object, as defined by the eef force surprassing
@@ -691,4 +779,5 @@ class Wipe(RobotEnv):
         Returns:
             bool: True if contact is surpasses given threshold magnitude
         """
+        #print("gripper normalized force: {}".format(np.linalg.norm(self.robots[0].ee_force - self.ee_force_bias)))
         return np.linalg.norm(self.robots[0].ee_force - self.ee_force_bias) > self.contact_threshold
