@@ -335,15 +335,11 @@ class SingleArm(Robot):
             [self.sim.data.qvel[x] for x in self._ref_joint_vel_indexes]
         )
 
-        # robot_states = [
-        #     np.sin(di[pf + "joint_pos"]),
-        #     np.cos(di[pf + "joint_pos"]),
-        #     di[pf + "joint_vel"],
-        # ]
-        di[pf + "eef_vlin"] = np.array(self.sim.data.site_xvelp[self.eef_site_id])
-        di[pf + "eef_vang"] = np.array(self.sim.data.site_xvelr[self.eef_site_id])
-
-        robot_states = [di[pf + "eef_vlin"], di[pf + "eef_vang"]]
+        robot_states = [
+            np.sin(di[pf + "joint_pos"]),
+            np.cos(di[pf + "joint_pos"]),
+            di[pf + "joint_vel"],
+        ]
 
         # Add in eef pos / qpos
         di[pf + "eef_pos"] = np.array(self.sim.data.site_xpos[self.eef_site_id])

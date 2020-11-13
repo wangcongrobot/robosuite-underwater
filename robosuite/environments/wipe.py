@@ -16,7 +16,7 @@ DEFAULT_WIPE_CONFIG = {
     "wipe_contact_reward": 0.01,                    # reward for contacting something with the wiping tool
     "unit_wiped_reward": 50.0,                      # reward per peg wiped
     "ee_accel_penalty": 0,                          # penalty for large end-effector accelerations 
-    "excess_force_penalty_mul": 0.01,               # penalty for each step that the force is over the safety threshold
+    "excess_force_penalty_mul": 0.05,               # penalty for each step that the force is over the safety threshold
     "distance_multiplier": 5.0,                     # multiplier for the dense reward inversely proportional to the mean location of the pegs to wipe
     "distance_th_multiplier": 5.0,                  # multiplier in the tanh function for the aforementioned reward
 
@@ -42,7 +42,7 @@ DEFAULT_WIPE_CONFIG = {
     "get_info": False,                              # Whether to grab info after each env step if not
     "use_robot_obs": True,                          # if we use robot observations (proprioception) as input to the policy
     "use_contact_obs": True,                        # if we use a binary observation for whether robot is in contact or not
-    "early_terminations": False,                    # Whether we allow for early terminations or not
+    "early_terminations": True,                     # Whether we allow for early terminations or not
     "use_condensed_obj_obs": True,                  # Whether to use condensed object observation representation (only applicable if obj obs is active)
 }
 
